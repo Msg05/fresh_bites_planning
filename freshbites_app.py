@@ -1,257 +1,383 @@
-# freshbites_app.py
 import streamlit as st
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
+import matplotlib.pyplot as plt
+from pulp import *
+import plotly.express as px
+import plotly.graph_objects as go
+from datetime import datetime
 
 # Set page config
 st.set_page_config(
-    page_title="FreshBites Supply Optimizer",
+    page_title="FreshBites Supply Chain Optimizer",
     page_icon="📦",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
 # Custom CSS
 st.markdown("""
 <style>
-    .main-header {font-size: 2.5rem; color: #1f77b4; text-align: center; margin-bottom: 1rem;}
-    .metric-card {background-color: #f8f9fa; padding: 15px; border-radius: 10px; margin: 10px; border-left: 4px solid #1f77b4;}
-    .critical {color: #dc3545; font-weight: bold;}
-    .warning {color: #fd7e14; font-weight: bold;}
-    .good {color: #28a745; font-weight: bold;}
-    .info-box {background-color: #e9ecef; padding: 15px; border-radius: 10px; margin: 10px;}
+    .main-header {
+        font-size: 2.5rem;
+        color: #2E86AB;
+        text-align: center;
+        margin-bottom: 2rem;
+    }
+    .metric-card {
+        background-color: #f8f9fa;
+        padding: 1rem;
+        border-radius: 10px;
+        border-left: 4px solid #2E86AB;
+        margin-bottom: 1rem;
+    }
+    .risk-high {
+        color: #e74c3c;
+        font-weight: bold;
+    }
+    .risk-medium {
+        color: #f39c12;
+        font-weight: bold;
+    }
+    .risk-low {
+        color: #27ae60;
+        font-weight: bold;
+    }
 </style>
 """, unsafe_allow_html=True)
 
-# App title
-st.markdown('<h1 class="main-header">📦 FreshBites Supply Chain Optimizer</h1>', unsafe_allow_html=True)
-st.write("Supply chain optimization for demand forecasting and production planning")
-
-# Sample data generation function (with all 5 SKUs)
-@st.cache_data
-def load_data():
-    np.random.seed(42)
-    weeks = 12
-    skus = ['Potato Chips', 'Nachos', 'Cookies', 'Energy Bar', 'Instant Noodles']
-    regions = ['Mumbai', 'Kolkata', 'Delhi']
-
-    data = []
-
-    for week_id in range(1, weeks + 1):
-        is_festival = 1 if week_id in [4, 8, 12] else 0
-
-        for sku in skus:
-            for region in regions:
-                base_demand = np.random.randint(20, 40)
-
-                if region == 'Mumbai':
-                    base_demand = int(base_demand * 1.4)
-                elif region == 'Kolkata' and sku != 'Cookies':
-                    base_demand = int(base_demand * 0.7)
-
-                forecast = base_demand + np.random.randint(-5, 5)
-                actual = int(base_demand * (1 + is_festival * np.random.uniform(0.4, 0.5)))
-                actual += np.random.randint(-7, 7)
-                actual = max(0, actual)
-
-                if region == 'Mumbai':
-                    current_stock = max(5, np.random.randint(0, 15))
-                elif region == 'Kolkata' and sku == 'Cookies':
-                    current_stock = np.random.randint(30, 50)
-                else:
-                    current_stock = np.random.randint(10, 25)
-
-                data.append({
-                    'Week_ID': week_id,
-                    'SKU': sku,
-                    'Region': region,
-                    'Forecast_Demand': round(forecast, 2),
-                    'Actual_Demand': round(actual, 2),
-                    'Current_Stock': current_stock,
-                    'Is_Festival': is_festival,
-                    'Plant': 'Delhi' if region in ['Delhi', 'Kolkata'] else 'Pune'
-                })
-
-    df = pd.DataFrame(data)
-
-    # Create adjusted forecast
-    def create_adjusted_forecast(row):
-        base_forecast = row['Forecast_Demand']
-        if row['Is_Festival'] == 1:
-            base_forecast = int(base_forecast * 1.45)
-        if row['Region'] == 'Mumbai':
-            base_forecast = int(base_forecast * 1.10)
-        elif row['Region'] == 'Kolkata' and row['SKU'] != 'Cookies':
-            base_forecast = int(base_forecast * 0.80)
-        return max(5, base_forecast)
-
-    df['Adjusted_Forecast'] = df.apply(create_adjusted_forecast, axis=1)
-    return df
-
-# Load data
-df = load_data()
-
-# Sidebar
-st.sidebar.header("Control Panel")
-selected_week = st.sidebar.selectbox("Select Week", sorted(df['Week_ID'].unique()))
-selected_region = st.sidebar.selectbox("Select Region", df['Region'].unique())
-selected_sku = st.sidebar.multiselect("Select SKUs", df['SKU'].unique(), default=df['SKU'].unique())
-
-# Filter data
-filtered_df = df[
-    (df['Week_ID'] == selected_week) &
-    (df['Region'] == selected_region) &
-    (df['SKU'].isin(selected_sku))
-]
-
-# Main dashboard
-st.header("Dashboard Overview")
-
-col1, col2, col3, col4 = st.columns(4)
-
-with col1:
-    st.metric("Total Demand", f"{filtered_df['Adjusted_Forecast'].sum()} units")
-
-with col2:
-    st.metric("Current Stock", f"{filtered_df['Current_Stock'].sum()} units")
-
-with col3:
-    stock_out_risk = (filtered_df['Current_Stock'] < filtered_df['Adjusted_Forecast']).sum()
-    st.metric("Stock-out Risks", f"{stock_out_risk}")
-
-with col4:
-    festival_status = "Yes" if filtered_df['Is_Festival'].iloc[0] == 1 else "No"
-    st.metric("Festival Week", festival_status)
-
-# Tabs
-tab1, tab2, tab3 = st.tabs(["Demand Analysis", "Production Plan", "Inventory Health"])
-
-with tab1:
-    st.subheader("Demand vs Stock Analysis")
-
-    # Simple table view
-    st.write("**Demand and Stock Overview**")
-    summary_df = filtered_df[['SKU', 'Adjusted_Forecast', 'Current_Stock']].copy()
-    summary_df['Difference'] = summary_df['Current_Stock'] - summary_df['Adjusted_Forecast']
-    summary_df['Status'] = np.where(
-        summary_df['Difference'] < 0,
-        '🔴 Stock-out Risk',
-        np.where(summary_df['Difference'] > summary_df['Adjusted_Forecast'] * 0.5, '🟡 Overstock', '🟢 Optimal')
-    )
-    st.dataframe(summary_df)
-    
-    # Create a simple bar chart using Streamlit's native bar_chart
-    chart_data = filtered_df.set_index('SKU')[['Adjusted_Forecast', 'Current_Stock']]
-    st.bar_chart(chart_data)
-
-with tab2:
-    st.subheader("Production Planning")
-
-    # Simple production calculation
-    def calculate_production_needs(data):
-        results = []
-        plant_capacities = {'Delhi': 100, 'Pune': 80}
-
-        for _, row in data.iterrows():
-            production_needed = max(0, row['Adjusted_Forecast'] - row['Current_Stock'])
-            if production_needed > 0:
-                # Simple allocation: 60% Delhi, 40% Pune
-                delhi_allocation = int(production_needed * 0.6)
-                pune_allocation = production_needed - delhi_allocation
-
-                results.append({
-                    'SKU': row['SKU'],
-                    'Total_Needed': production_needed,
-                    'Delhi_Allocation': delhi_allocation,
-                    'Pune_Allocation': pune_allocation,
-                    'Current_Stock': row['Current_Stock'],
-                    'Demand': row['Adjusted_Forecast']
-                })
-
-        return pd.DataFrame(results)
-
-    production_plan = calculate_production_needs(filtered_df)
-
-    if not production_plan.empty:
-        st.success("Production plan generated!")
-        st.dataframe(production_plan)
-
-        # Show total production needed
-        total_production = production_plan['Total_Needed'].sum()
-        st.write(f"**Total Production Needed:** {total_production} units")
-
-        # Check capacity utilization
-        delhi_utilization = (production_plan['Delhi_Allocation'].sum() / 100) * 100
-        pune_utilization = (production_plan['Pune_Allocation'].sum() / 80) * 100
-
-        st.write(f"**Delhi Plant Utilization:** {delhi_utilization:.1f}%")
-        st.write(f"**Pune Plant Utilization:** {pune_utilization:.1f}%")
+class FreshBitesOptimizer:
+    def __init__(self):
+        self.df = None
+        self.plant_capacities = {'Delhi': 100, 'Pune': 80}
+        self.PROFIT_MARGIN = 2.50
+        self.HOLDING_COST = 0.20
+        self.STOCK_OUT_COST = 4.00
         
-        # Create a simple bar chart for production allocation
-        if len(production_plan) > 0:
-            prod_chart_data = production_plan.set_index('SKU')[['Delhi_Allocation', 'Pune_Allocation']]
-            st.bar_chart(prod_chart_data)
-    else:
-        st.info("No production needed - current stock is sufficient")
-
-with tab3:
-    st.subheader("Inventory Health Analysis")
-
-    critical_items = filtered_df[filtered_df['Current_Stock'] < filtered_df['Adjusted_Forecast'] * 0.5]
-    overstock_items = filtered_df[filtered_df['Current_Stock'] > filtered_df['Adjusted_Forecast'] * 1.5]
-    optimal_items = filtered_df[
-        (filtered_df['Current_Stock'] >= filtered_df['Adjusted_Forecast'] * 0.5) &
-        (filtered_df['Current_Stock'] <= filtered_df['Adjusted_Forecast'] * 1.5)
-    ]
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        st.write("**Inventory Status**")
-        st.metric("Critical Risks", len(critical_items))
-        st.metric("Overstock Items", len(overstock_items))
-        st.metric("Optimal Levels", len(optimal_items))
+    def generate_data(self):
+        """Generate synthetic data"""
+        np.random.seed(42)
+        weeks = 35
+        skus = ['Potato Chips', 'Nachos', 'Cookies', 'Energy Bar', 'Instant Noodles']
+        regions = ['Mumbai', 'Kolkata', 'Delhi']
         
-        # Create a pie chart using a bar chart as approximation
-        status_data = pd.DataFrame({
-            'Status': ['Critical', 'Overstock', 'Optimal'],
-            'Count': [len(critical_items), len(overstock_items), len(optimal_items)]
-        })
-        st.bar_chart(status_data.set_index('Status'))
-
-    with col2:
-        st.write("**Critical Stock-out Risks**")
-        if not critical_items.empty:
-            for _, item in critical_items.iterrows():
-                st.error(f"{item['SKU']}: {item['Current_Stock']} units (need {item['Adjusted_Forecast']})")
-        else:
-            st.success("No critical stock-out risks!")
+        dates = pd.date_range(start='2023-01-01', periods=weeks, freq='W-SUN')
+        data = []
+        
+        for week_id, date in enumerate(dates, 1):
+            is_festival = 1 if week_id in [5, 10, 15, 20, 25, 30, 35] else 0
             
-        st.write("**Overstock Items**")
-        if not overstock_items.empty:
-            for _, item in overstock_items.iterrows():
-                st.warning(f"{item['SKU']}: {item['Current_Stock']} units (demand: {item['Adjusted_Forecast']})")
+            for sku in skus:
+                for region in regions:
+                    base_demand = np.random.randint(20, 40)
+                    
+                    if region == 'Mumbai':
+                        base_demand *= 1.4
+                    elif region == 'Kolkata' and sku != 'Cookies':
+                        base_demand *= 0.7
+                    
+                    forecast = base_demand + np.random.randint(-5, 5)
+                    actual = base_demand * (1 + is_festival * np.random.uniform(0.4, 0.5))
+                    actual += np.random.randint(-7, 7)
+                    actual = max(0, actual)
+                    
+                    if region == 'Mumbai':
+                        current_stock = max(5, np.random.randint(0, 15))
+                    elif region == 'Kolkata' and sku == 'Cookies':
+                        current_stock = np.random.randint(30, 50)
+                    else:
+                        current_stock = np.random.randint(10, 25)
+                    
+                    data.append({
+                        'Week_ID': week_id,
+                        'Date': date,
+                        'SKU': sku,
+                        'Region': region,
+                        'Forecast_Demand': round(forecast, 2),
+                        'Actual_Demand': round(actual, 2),
+                        'Current_Stock': current_stock,
+                        'Is_Festival': is_festival,
+                    })
+        
+        self.df = pd.DataFrame(data)
+        self.df['Plant'] = self.df['Region'].apply(
+            lambda x: 'Delhi' if x in ['Delhi', 'Kolkata'] else 'Pune'
+        )
+        
+        # Create adjusted forecast
+        self.df['Adjusted_Forecast'] = self.df.apply(self._create_adjusted_forecast, axis=1)
+        
+    def _create_adjusted_forecast(self, row):
+        """Create adjusted forecast with business rules"""
+        base_forecast = row['Forecast_Demand']
+        
+        if row['Is_Festival'] == 1:
+            base_forecast *= 1.45
+        
+        if row['Region'] == 'Mumbai':
+            base_forecast *= 1.10
+        elif row['Region'] == 'Kolkata' and row['SKU'] != 'Cookies':
+            base_forecast *= 0.80
+        
+        return max(5, base_forecast)
+    
+    def run_optimization(self, week_id):
+        """Run production optimization for a given week"""
+        week_data = self.df[self.df['Week_ID'] == week_id].copy()
+        skus = week_data['SKU'].unique()
+        plants = week_data['Plant'].unique()
+        
+        demand_dict = week_data.groupby('SKU')['Adjusted_Forecast'].first().to_dict()
+        stock_dict = week_data.groupby('SKU')['Current_Stock'].first().to_dict()
+        
+        prob = LpProblem("FreshBites_Optimization", LpMinimize)
+        
+        production_vars = LpVariable.dicts(
+            "Production", 
+            ((sku, plant) for sku in skus for plant in plants),
+            lowBound=0, cat='Continuous'
+        )
+        
+        stock_out_vars = LpVariable.dicts("Stock_Out", (sku for sku in skus), lowBound=0, cat='Continuous')
+        
+        prob += lpSum([stock_out_vars[sku] for sku in skus]) + \
+                0.001 * lpSum([production_vars[sku, plant] for sku in skus for plant in plants])
+        
+        for plant in plants:
+            prob += lpSum([production_vars[sku, plant] for sku in skus]) <= self.plant_capacities[plant]
+        
+        for sku in skus:
+            total_production = lpSum([production_vars[sku, plant] for plant in plants])
+            prob += (total_production + stock_dict[sku] + stock_out_vars[sku] >= demand_dict[sku])
+        
+        prob.solve(PULP_CBC_CMD(msg=False))
+        
+        if LpStatus[prob.status] == 'Optimal':
+            results = []
+            for sku in skus:
+                for plant in plants:
+                    var = production_vars[sku, plant]
+                    if var.varValue > 0.1:
+                        results.append({
+                            'SKU': sku,
+                            'Plant': plant,
+                            'Production_Allocated': round(var.varValue, 2),
+                            'Demand_Target': round(demand_dict[sku], 2),
+                            'Current_Stock': stock_dict[sku]
+                        })
+            return pd.DataFrame(results), value(prob.objective)
+        return pd.DataFrame(), 0
+    
+    def calculate_performance(self, week_id, use_adjusted=True):
+        """Calculate performance metrics for a week"""
+        week_data = self.df[self.df['Week_ID'] == week_id]
+        demand_target = 'Adjusted_Forecast' if use_adjusted else 'Forecast_Demand'
+        
+        total_demand = week_data[demand_target].sum()
+        total_stock = week_data['Current_Stock'].sum()
+        potential_sales = min(total_demand, total_stock)
+        stock_out_units = max(0, total_demand - total_stock)
+        excess_stock_units = max(0, total_stock - total_demand)
+        
+        revenue = potential_sales * self.PROFIT_MARGIN
+        stock_out_cost = stock_out_units * self.STOCK_OUT_COST
+        holding_cost = excess_stock_units * self.HOLDING_COST
+        net_profit = revenue - stock_out_cost - holding_cost
+        
+        return {
+            'total_demand': total_demand,
+            'total_stock': total_stock,
+            'potential_sales': potential_sales,
+            'stock_out_units': stock_out_units,
+            'excess_stock_units': excess_stock_units,
+            'revenue': revenue,
+            'stock_out_cost': stock_out_cost,
+            'holding_cost': holding_cost,
+            'net_profit': net_profit
+        }
+    
+    def calculate_inventory_risk(self, week_id):
+        """Calculate inventory risks for a week"""
+        week_data = self.df[self.df['Week_ID'] == week_id].copy()
+        
+        week_data['safety_stock'] = week_data['Adjusted_Forecast'] * 0.5
+        week_data['reorder_point'] = week_data['safety_stock'] * 1.5
+        week_data['stock_out_risk'] = week_data['Current_Stock'] < week_data['safety_stock']
+        week_data['overstock_risk'] = week_data['Current_Stock'] > (week_data['reorder_point'] * 2)
+        
+        return week_data
+
+def main():
+    st.markdown('<h1 class="main-header">📦 FreshBites Supply Chain Optimizer</h1>', unsafe_allow_html=True)
+    
+    # Initialize optimizer
+    if 'optimizer' not in st.session_state:
+        st.session_state.optimizer = FreshBitesOptimizer()
+        st.session_state.optimizer.generate_data()
+    
+    optimizer = st.session_state.optimizer
+    
+    # Sidebar
+    st.sidebar.header("Configuration")
+    selected_week = st.sidebar.selectbox(
+        "Select Week",
+        options=sorted(optimizer.df['Week_ID'].unique()),
+        index=len(optimizer.df['Week_ID'].unique()) - 1
+    )
+    
+    # Main content
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.metric("Total SKUs", len(optimizer.df['SKU'].unique()))
+    with col2:
+        st.metric("Total Regions", len(optimizer.df['Region'].unique()))
+    with col3:
+        festival_weeks = optimizer.df['Is_Festival'].sum()
+        st.metric("Festival Weeks", festival_weeks)
+    
+    # Week overview
+    st.subheader(f"Week {selected_week} Overview")
+    week_data = optimizer.df[optimizer.df['Week_ID'] == selected_week]
+    is_festival = week_data['Is_Festival'].iloc[0]
+    
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.info(f"**Festival Week:** {'Yes' if is_festival else 'No'}")
+    with col2:
+        total_demand = week_data['Adjusted_Forecast'].sum()
+        st.metric("Total Demand", f"{total_demand:.0f} units")
+    with col3:
+        total_stock = week_data['Current_Stock'].sum()
+        st.metric("Current Stock", f"{total_stock:.0f} units")
+    with col4:
+        stock_ratio = (total_stock / total_demand * 100) if total_demand > 0 else 0
+        st.metric("Stock Coverage", f"{stock_ratio:.1f}%")
+    
+    # Demand vs Stock chart
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=week_data['SKU'] + ' - ' + week_data['Region'],
+        y=week_data['Adjusted_Forecast'],
+        name='Adjusted Forecast',
+        marker_color='#2E86AB'
+    ))
+    fig.add_trace(go.Bar(
+        x=week_data['SKU'] + ' - ' + week_data['Region'],
+        y=week_data['Current_Stock'],
+        name='Current Stock',
+        marker_color='#A23B72'
+    ))
+    fig.update_layout(
+        title='Demand vs Current Stock by SKU-Region',
+        barmode='group',
+        height=400,
+        xaxis_tickangle=-45
+    )
+    st.plotly_chart(fig, use_container_width=True)
+    
+    # Optimization section
+    st.subheader("Production Optimization")
+    if st.button("Run Optimization", type="primary"):
+        with st.spinner("Running optimization..."):
+            results_df, stock_out = optimizer.run_optimization(selected_week)
+            
+        if not results_df.empty:
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.success("✅ Optimization Complete!")
+                st.metric("Projected Stock-Out", f"{stock_out:.1f} units")
+                
+                # Production summary
+                st.write("**Production Summary:**")
+                production_summary = results_df.groupby('Plant')['Production_Allocated'].sum()
+                for plant, production in production_summary.items():
+                    capacity = optimizer.plant_capacities[plant]
+                    utilization = (production / capacity) * 100
+                    st.write(f"- {plant}: {production:.0f} units ({utilization:.1f}% utilization)")
+            
+            with col2:
+                # Production allocation chart
+                fig = px.bar(
+                    results_df, 
+                    x='SKU', 
+                    y='Production_Allocated', 
+                    color='Plant',
+                    title='Production Allocation by SKU and Plant',
+                    barmode='group'
+                )
+                st.plotly_chart(fig, use_container_width=True)
+            
+            # Detailed results
+            st.write("**Detailed Production Plan:**")
+            st.dataframe(results_df.style.format({
+                'Production_Allocated': '{:.1f}',
+                'Demand_Target': '{:.1f}',
+                'Current_Stock': '{:.0f}'
+            }))
         else:
-            st.success("No overstock items!")
+            st.info("No production allocation needed. Current stock is sufficient.")
+    
+    # Inventory Risk Analysis
+    st.subheader("Inventory Risk Analysis")
+    risk_data = optimizer.calculate_inventory_risk(selected_week)
+    
+    stock_out_risks = risk_data[risk_data['stock_out_risk']]
+    overstock_risks = risk_data[risk_data['overstock_risk']]
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.write("**Stock-Out Risks:**")
+        if not stock_out_risks.empty:
+            for _, risk in stock_out_risks.iterrows():
+                st.error(
+                    f"🚨 {risk['SKU']} in {risk['Region']}: "
+                    f"{risk['Current_Stock']} units (Safety: {risk['safety_stock']:.1f})"
+                )
+        else:
+            st.success("No critical stock-out risks")
+    
+    with col2:
+        st.write("**Overstock Risks:**")
+        if not overstock_risks.empty:
+            for _, risk in overstock_risks.iterrows():
+                st.warning(
+                    f"⚠️ {risk['SKU']} in {risk['Region']}: "
+                    f"{risk['Current_Stock']} units (Max Optimal: {risk['reorder_point'] * 1.2:.1f})"
+                )
+        else:
+            st.success("No overstock risks")
+    
+    # Performance comparison
+    st.subheader("Performance Analysis")
+    baseline_perf = optimizer.calculate_performance(selected_week, use_adjusted=False)
+    optimized_perf = optimizer.calculate_performance(selected_week, use_adjusted=True)
+    
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("Revenue Potential", f"₹{optimized_perf['revenue']:.0f}")
+    with col2:
+        st.metric("Stock-out Cost", f"₹{optimized_perf['stock_out_cost']:.0f}")
+    with col3:
+        st.metric("Holding Cost", f"₹{optimized_perf['holding_cost']:.0f}")
+    with col4:
+        st.metric("Net Profit", f"₹{optimized_perf['net_profit']:.0f}")
+    
+    # Data explorer
+    st.sidebar.subheader("Data Explorer")
+    if st.sidebar.checkbox("Show Raw Data"):
+        st.sidebar.dataframe(optimizer.df)
+    
+    if st.sidebar.checkbox("Download Data"):
+        csv = optimizer.df.to_csv(index=False)
+        st.sidebar.download_button(
+            label="Download CSV",
+            data=csv,
+            file_name="freshbites_data.csv",
+            mime="text/csv"
+        )
 
-# Business impact
-st.sidebar.markdown("---")
-st.sidebar.info("""
-**Business Impact:**
-- 45% better forecasting
-- 62% fewer stock-outs
-- ₹1.2L weekly savings
-""")
-
-# Data download
-st.sidebar.markdown("---")
-st.sidebar.download_button(
-    label="Download Data",
-    data=filtered_df.to_csv(index=False),
-    file_name=f"freshbites_week_{selected_week}.csv",
-    mime="text/csv"
-)
-
-# Footer
-st.markdown("---")
-st.caption("FreshBites Supply Chain Optimizer v1.0 | Built with Streamlit")
+if __name__ == "__main__":
+    main()
